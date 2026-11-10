@@ -1,0 +1,157 @@
+{% extends "base.html" %}
+{% block title %}Library — AutoDock{% endblock %}
+{% block content %}
+<h1>Ligand Library</h1>
+
+<div class="card-row">
+  <div class="card">
+    <h2>Upload Ligands</h2>
+    <div class="drop-zone" id="ligand-drop">
+      <input type="file" id="ligand-files" accept=".pdb" multiple>
+      <div>Drop PDB files here or click to browse</div>
+      <div class="muted mt1">Multiple files supported</div>
+    </div>
+    <div class="mt1 flex">
+      <button class="btn btn-primary" id="upload-btn" disabled>Upload</button>
+      <span class="muted" id="upload-status"></span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Process Library</h2>
+    <div class="form-group">
+      <label>Conformers per ligand</label>
+      <input type="number" id="n-conformers" placeholder="auto (size-scaled)" min="0" max="500">
+    </div>
+    <div class="flex mt1">
+      <button class="btn btn-success" id="prep-btn">Run Prep (incremental)</button>
+      <button class="btn btn-ghost" id="prep-all-btn">Force All</button>
+    </div>
+    <div class="muted mt1" id="prep-status"></div>
+  </div>
+</div>
+
+<div class="card mt1">
+  <div class="flex" style="margin-bottom:0.8rem;">
+    <h2 style="margin:0;">Ligands ({{ ligands|length }})</h2>
+    <span class="spacer"></span>
+    <input type="text" id="search" placeholder="Search…"
+           style="width:200px;padding:0.35rem 0.6rem;">
+  </div>
+  <table id="lig-table">
+    <thead><tr>
+      <th data-sort>Name</th>
+      <th data-sort>Formula</th>
+      <th data-sort>Heavy</th>
+      <th data-sort>Rot</th>
+      <th data-sort>Conformers</th>
+      <th data-sort>Mode</th>
+      <th data-sort>Status</th>
+    </tr></thead>
+    <tbody>
+    {% for lig in ligands %}
+    <tr class="lig-row">
+      <td>{{ lig.name }}</td>
+      <td class="muted">{{ lig.formula }}</td>
+      <td data-val="{{ lig.n_heavy_atoms }}">{{ lig.n_heavy_atoms }}</td>
+      <td data-val="{{ lig.n_rot_bonds }}">{{ lig.n_rot_bonds }}</td>
+      <td data-val="{{ lig.n_conformers }}">
+        {% if lig.use_flex_fallback %}—{% else %}{{ lig.n_conformers }}{% endif %}
+      </td>
+      <td>
+        {% if lig.use_flex_fallback %}
+          <span class="badge badge-yellow">flex-fallback</span>
+        {% elif lig.n_conformers > 0 %}
+          <span class="badge badge-blue">conformers</span>
+        {% else %}
+          <span class="badge badge-gray">flex</span>
+        {% endif %}
+      </td>
+      <td>
+        {% if lig.status == 'ready' %}
+          <span class="badge badge-green">ready</span>
+        {% elif lig.status == 'processing' %}
+          <span class="badge badge-yellow">processing</span>
+        {% elif lig.status == 'failed' %}
+          <span class="badge badge-red" title="{{ lig.error_msg }}">failed</span>
+        {% else %}
+          <span class="badge badge-gray">{{ lig.status }}</span>
+        {% endif %}
+      </td>
+    </tr>
+    {% else %}
+    <tr><td colspan="7" class="muted" style="text-align:center;padding:2rem;">
+      No ligands in library. Upload PDB files above.
+    </td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+// Upload
+const input = document.getElementById('ligand-files');
+const btn   = document.getElementById('upload-btn');
+const stat  = document.getElementById('upload-status');
+
+input.addEventListener('change', () => {
+  btn.disabled = input.files.length === 0;
+  stat.textContent = input.files.length
+    ? `${input.files.length} file(s) selected` : '';
+});
+
+btn.addEventListener('click', async () => {
+  const fd = new FormData();
+  [...input.files].forEach(f => fd.append('pdbs', f));
+  btn.disabled = true;
+  stat.textContent = 'Uploading…';
+  try {
+    const r = await fetch('/library/upload', { method:'POST', body: fd });
+    const d = await r.json();
+    if (d.saved) {
+      toast(`${d.saved} file(s) uploaded`);
+      stat.textContent = `${d.saved} uploaded`;
+      setTimeout(() => location.reload(), 1200);
+    } else {
+      toast(d.error || 'Upload failed', false);
+      stat.textContent = 'Failed';
+    }
+  } catch(e) { toast('Upload error', false); }
+  btn.disabled = false;
+});
+
+// Prep
+async function submitPrep(force) {
+  const body = {
+    refresh_all: force,
+    conformers: document.getElementById('n-conformers').value || null,
+  };
+  document.getElementById('prep-status').textContent = 'Submitting…';
+  try {
+    const r = await fetch('/library/prep', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(body)
+    });
+    const d = await r.json();
+    if (d.job_id) {
+      toast(`Job submitted: ${d.job_id}`);
+      document.getElementById('prep-status').textContent = `Job: ${d.job_id}`;
+    } else {
+      toast(d.error || 'Failed', false);
+    }
+  } catch(e) { toast('Error', false); }
+}
+document.getElementById('prep-btn').onclick = () => submitPrep(false);
+document.getElementById('prep-all-btn').onclick = () => submitPrep(true);
+
+// Search filter
+document.getElementById('search').addEventListener('input', function() {
+  const q = this.value.toLowerCase();
+  document.querySelectorAll('.lig-row').forEach(row => {
+    row.style.display = row.textContent.toLowerCase().includes(q) ? '' : 'none';
+  });
+});
+</script>
+{% endblock %}

@@ -1,0 +1,158 @@
+{% extends "base.html" %}
+{% block title %}{{ name }} — AutoDock{% endblock %}
+{% block content %}
+<div class="flex" style="margin-bottom:1rem;">
+  <a href="/receptors" class="btn btn-ghost" style="padding:0.3rem 0.6rem;">← Receptors</a>
+  <h1 style="margin:0;">{{ name }}</h1>
+  <span class="spacer"></span>
+  <button class="btn btn-danger" id="delete-btn"
+          style="padding:0.3rem 0.7rem;font-size:0.82rem;">
+    Delete Receptor
+  </button>
+</div>
+<div id="delete-confirm" style="display:none;" class="card"
+     style="border-color:#dc2626;margin-bottom:1rem;">
+  <p style="margin-bottom:0.6rem;">
+    ⚠ This will permanently delete <strong>{{ name }}</strong> and all
+    associated models, maps, and results. This cannot be undone.
+  </p>
+  <div class="flex">
+    <button class="btn btn-danger" id="delete-confirm-btn">
+      Yes, delete permanently
+    </button>
+    <button class="btn btn-ghost" id="delete-cancel-btn">Cancel</button>
+  </div>
+</div>
+
+<div class="card">
+  <h2>Models ({{ models|length }})</h2>
+  <table>
+    <thead><tr>
+      <th data-sort>ID</th>
+      <th data-sort>Status</th>
+      <th data-sort>Active Site RMSD (Å)</th>
+      <th data-sort>Included</th>
+      <th>Notes</th>
+    </tr></thead>
+    <tbody>
+    {% for m in models %}
+    <tr>
+      <td>{{ m.model_id }}</td>
+      <td>
+        {% if m.prep_status == 'ready' %}
+          <span class="badge badge-green">ready</span>
+        {% elif m.prep_status == 'processing' %}
+          <span class="badge badge-yellow">processing</span>
+        {% elif m.prep_status == 'failed' %}
+          <span class="badge badge-red">failed</span>
+        {% else %}
+          <span class="badge badge-gray">{{ m.prep_status }}</span>
+        {% endif %}
+      </td>
+      <td data-val="{{ m.active_site_rmsd if m.active_site_rmsd >= 0 else 999 }}">
+        {% if m.active_site_rmsd >= 0 %}
+          {{ "%.3f"|format(m.active_site_rmsd) }}
+        {% else %}
+          <span class="muted">—</span>
+        {% endif %}
+      </td>
+      <td>
+        {% if m.included %}
+          <span class="badge badge-green">yes</span>
+        {% else %}
+          <span class="badge badge-red">excluded</span>
+        {% endif %}
+      </td>
+      <td class="muted">{{ m.exclusion_reason or '' }}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+{% if results %}
+<div class="card mt1">
+  <div class="flex" style="margin-bottom:0.8rem;">
+    <h2 style="margin:0;">Results ({{ results|length }})</h2>
+    <span class="spacer"></span>
+    <a href="/results/{{ name }}/download/csv" class="btn btn-ghost"
+       style="padding:0.3rem 0.7rem;font-size:0.82rem;">⬇ CSV</a>
+    <a href="/results/{{ name }}/download/complexes" class="btn btn-ghost"
+       style="padding:0.3rem 0.7rem;font-size:0.82rem;">⬇ Complexes (.zip)</a>
+  </div>
+  <table>
+    <thead><tr>
+      <th data-sort>Ligand</th>
+      <th data-sort>Score (kcal/mol)</th>
+      <th data-sort>Validation</th>
+      <th data-sort>Models</th>
+      <th data-sort>Conformers</th>
+      <th></th>
+    </tr></thead>
+    <tbody>
+    {% for r in results %}
+    <tr>
+      <td>{{ r.name }}</td>
+      <td data-val="{{ r.score }}">
+        {% if r.score %}
+          {% set s = r.score|float %}
+          <span class="{% if s < -12 %}score-good{% elif s < -8 %}score-ok{% else %}score-bad{% endif %}">
+            {{ "%.3f"|format(s) }}
+          </span>
+        {% else %}
+          <span class="muted">—</span>
+        {% endif %}
+      </td>
+      <td>
+        {% if r.validation == 'OK' %}
+          <span class="badge badge-green">OK</span>
+        {% elif 'CLASH' in r.validation %}
+          <span class="badge badge-red clash">{{ r.validation }}</span>
+        {% else %}
+          <span class="badge badge-gray">{{ r.validation }}</span>
+        {% endif %}
+      </td>
+      <td>{{ r.n_receptor_models }}</td>
+      <td>{{ r.n_ligand_conformers }}</td>
+      <td>
+        {% if r.complex %}
+        <a href="/results/{{ name }}/complex/{{ r.name }}"
+           class="btn btn-ghost" style="padding:0.2rem 0.5rem;font-size:0.78rem;">
+          ⬇ PDB
+        </a>
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+<script>
+document.getElementById('delete-btn').addEventListener('click', () => {
+  document.getElementById('delete-confirm').style.display = '';
+  document.getElementById('delete-btn').style.display = 'none';
+});
+document.getElementById('delete-cancel-btn').addEventListener('click', () => {
+  document.getElementById('delete-confirm').style.display = 'none';
+  document.getElementById('delete-btn').style.display = '';
+});
+document.getElementById('delete-confirm-btn').addEventListener('click', async () => {
+  document.getElementById('delete-confirm-btn').disabled = true;
+  document.getElementById('delete-confirm-btn').textContent = 'Deleting…';
+  try {
+    const r = await fetch('/receptors/{{ name }}/delete', { method: 'POST' });
+    const d = await r.json();
+    if (d.ok) {
+      window.location.href = '/receptors';
+    } else {
+      alert('Delete failed: ' + (d.error || 'unknown error'));
+      document.getElementById('delete-confirm-btn').disabled = false;
+      document.getElementById('delete-confirm-btn').textContent = 'Yes, delete permanently';
+    }
+  } catch(e) {
+    alert('Delete failed: ' + e);
+  }
+});
+</script>
+{% endblock %}

@@ -1,0 +1,136 @@
+{% extends "base.html" %}
+{% block title %}Results: {{ receptor_name }} — AutoDock{% endblock %}
+{% block content %}
+<div class="flex" style="margin-bottom:1rem;">
+  <a href="/receptors/{{ receptor_name }}" class="btn btn-ghost"
+     style="padding:0.3rem 0.6rem;">← {{ receptor_name }}</a>
+  <h1 style="margin:0;">Results: {{ receptor_name }}</h1>
+  <span class="spacer"></span>
+  <a href="/results/{{ receptor_name }}/download/csv" class="btn btn-ghost">⬇ CSV</a>
+  <a href="/results/{{ receptor_name }}/download/complexes" class="btn btn-ghost">⬇ All Complexes</a>
+  <a href="/dock?receptor={{ receptor_name }}" class="btn btn-primary">Re-dock</a>
+</div>
+
+{% if not results %}
+<div class="card">
+  <p class="muted" style="text-align:center;padding:2rem;">
+    No results yet. Submit a docking job first.
+  </p>
+</div>
+{% else %}
+
+<div class="card-row" style="margin-bottom:1rem;">
+  {% set scored = results|selectattr('score')|list %}
+  {% set good   = scored|selectattr('validation','equalto','OK')|list %}
+  {% set clashes = results|rejectattr('validation','in',['OK','no_complex',''])|list %}
+  <div class="card"><div class="stat">
+    <div class="val">{{ results|length }}</div><div class="lbl">Total</div>
+  </div></div>
+  <div class="card"><div class="stat">
+    <div class="val score-good">{{ good|length }}</div><div class="lbl">Clean poses</div>
+  </div></div>
+  <div class="card"><div class="stat">
+    <div class="val clash">{{ clashes|length }}</div><div class="lbl">Clashing</div>
+  </div></div>
+  {% if scored %}
+  <div class="card"><div class="stat">
+    <div class="val score-good">
+      {{ "%.2f"|format(scored|map(attribute='score')|map('float')|min) }}
+    </div><div class="lbl">Best score (kcal/mol)</div>
+  </div></div>
+  {% endif %}
+</div>
+
+<div class="card">
+  <div class="flex" style="margin-bottom:0.8rem;">
+    <input type="text" id="search" placeholder="Search ligands…"
+           style="width:220px;padding:0.35rem 0.6rem;">
+    <label style="margin-left:1rem;display:inline;font-size:0.85rem;">
+      <input type="checkbox" id="hide-clash"> Hide clashing
+    </label>
+    <label style="margin-left:1rem;display:inline;font-size:0.85rem;">
+      <input type="checkbox" id="hide-noscorer"> Scored only
+    </label>
+  </div>
+
+  <table id="results-table">
+    <thead><tr>
+      <th data-sort>Rank</th>
+      <th data-sort>Ligand</th>
+      <th data-sort>Score (kcal/mol)</th>
+      <th data-sort>Validation</th>
+      <th data-sort>R models</th>
+      <th data-sort>Conformers</th>
+      <th data-sort>Docked</th>
+      <th></th>
+    </tr></thead>
+    <tbody>
+    {% set sorted_results = results|sort(attribute='score')|list %}
+    {% for r in sorted_results %}
+    <tr class="result-row
+        {% if 'CLASH' in r.validation %}clash-row{% endif %}
+        {% if not r.score %}no-score-row{% endif %}">
+      <td data-val="{{ loop.index }}">{{ loop.index }}</td>
+      <td>{{ r.name }}</td>
+      <td data-val="{{ r.score or 999 }}">
+        {% if r.score %}
+          {% set s = r.score|float %}
+          <span class="{% if s < -12 %}score-good{% elif s < -8 %}score-ok{% else %}score-bad{% endif %}">
+            {{ "%.3f"|format(s) }}
+          </span>
+        {% else %}
+          <span class="muted">—</span>
+        {% endif %}
+      </td>
+      <td>
+        {% if r.validation == 'OK' %}
+          <span class="badge badge-green">OK</span>
+        {% elif 'CLASH' in r.validation %}
+          <span class="badge badge-red">{{ r.validation }}</span>
+        {% else %}
+          <span class="badge badge-gray">{{ r.validation or '—' }}</span>
+        {% endif %}
+      </td>
+      <td>{{ r.n_receptor_models }}</td>
+      <td>{{ r.n_ligand_conformers }}</td>
+      <td class="muted" style="font-size:0.78rem;">
+        {{ r.docked_at[:10] if r.docked_at else '—' }}
+      </td>
+      <td>
+        {% if r.complex %}
+        <a href="/results/{{ receptor_name }}/complex/{{ r.name }}"
+           class="btn btn-ghost" style="padding:0.2rem 0.5rem;font-size:0.78rem;">
+          ⬇ PDB
+        </a>
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+function applyFilters() {
+  const q         = document.getElementById('search').value.toLowerCase();
+  const hideClash = document.getElementById('hide-clash').checked;
+  const hideNone  = document.getElementById('hide-noscorer').checked;
+
+  document.querySelectorAll('.result-row').forEach(row => {
+    const isClash  = row.classList.contains('clash-row');
+    const noScore  = row.classList.contains('no-score-row');
+    const matches  = row.textContent.toLowerCase().includes(q);
+    row.style.display =
+      matches && !(hideClash && isClash) && !(hideNone && noScore) ? '' : 'none';
+  });
+}
+
+['search','hide-clash','hide-noscorer'].forEach(id => {
+  document.getElementById(id).addEventListener('input', applyFilters);
+  document.getElementById(id).addEventListener('change', applyFilters);
+});
+</script>
+{% endblock %}

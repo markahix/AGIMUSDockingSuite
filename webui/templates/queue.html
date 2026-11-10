@@ -1,0 +1,93 @@
+{% extends "base.html" %}
+{% block title %}Queue — AutoDock Pipeline{% endblock %}
+{% block content %}
+
+<div class="card">
+  <div style="display:flex;align-items:center;gap:0.75rem;margin-bottom:0.75rem;">
+    <h2 style="margin:0;">Job Queue</h2>
+    <span class="spacer" style="flex:1;"></span>
+    <span class="muted" id="q-counts"></span>
+  </div>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Submitted</th>
+        <th>Type</th>
+        <th>Status</th>
+        <th>Host</th>
+        <th>Elapsed</th>
+        <th>Expected</th>
+        <th>Job</th>
+      </tr>
+    </thead>
+    <tbody id="q-body">
+      <tr><td colspan="7" class="muted">Loading…</td></tr>
+    </tbody>
+  </table>
+  <div class="muted" style="margin-top:0.6rem;font-size:0.78rem;">
+    Expected runtime is a rough historical median for the job type — AutoDock
+    timing varies widely with pocket, library size and GPU contention. Refreshes
+    every 5&nbsp;s.
+  </div>
+</div>
+
+<script>
+const INITIAL = {{ queue|tojson }};
+
+function fmtSecs(s) {
+  if (s === null || s === undefined) return '—';
+  s = Math.round(s);
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+  if (h) return `${h}h ${m}m`;
+  if (m) return `${m}m ${sec}s`;
+  return `${sec}s`;
+}
+
+function fmtTime(iso) {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  if (isNaN(d)) return '—';
+  return d.toLocaleString([], {month:'short', day:'numeric',
+                             hour:'2-digit', minute:'2-digit'});
+}
+
+const BADGE = {running:'badge-yellow', pending:'badge-gray',
+               completed:'badge-green', failed:'badge-red'};
+
+function render(q) {
+  const c = q.counts || {};
+  document.getElementById('q-counts').textContent =
+    `running ${c.running||0} · pending ${c.pending||0} · ` +
+    `completed ${c.completed||0} · failed ${c.failed||0}`;
+
+  const body = document.getElementById('q-body');
+  const rows = q.rows || [];
+  if (!rows.length) {
+    body.innerHTML = '<tr><td colspan="7" class="muted">Queue is empty.</td></tr>';
+    return;
+  }
+  body.innerHTML = rows.map(r => `
+    <tr>
+      <td>${fmtTime(r.submitted_at)}</td>
+      <td>${r.type || '?'}</td>
+      <td><span class="badge ${BADGE[r.status] || 'badge-gray'}">${r.status}</span></td>
+      <td>${r.host ? r.host : '<span class="muted">—</span>'}</td>
+      <td>${r.status === 'running' || r.elapsed_s != null ? fmtSecs(r.elapsed_s) : '<span class="muted">—</span>'}</td>
+      <td>${(r.status === 'pending' || r.status === 'running')
+             ? '~' + fmtSecs(r.expected_s) : '<span class="muted">—</span>'}</td>
+      <td class="muted" style="font-size:0.78rem;">${r.job_id || ''}</td>
+    </tr>`).join('');
+}
+
+async function refresh() {
+  try {
+    const r = await fetch('/api/queue');
+    if (r.ok) render(await r.json());
+  } catch (e) { /* keep last render on transient error */ }
+}
+
+render(INITIAL);
+setInterval(refresh, 5000);
+</script>
+{% endblock %}

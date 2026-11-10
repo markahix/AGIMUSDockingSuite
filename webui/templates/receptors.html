@@ -1,0 +1,552 @@
+{% extends "base.html" %}
+{% block title %}Receptors — AutoDock{% endblock %}
+{% block content %}
+<h1>Receptor Library</h1>
+
+<div class="card-row">
+  <div class="card" style="flex:2;">
+    <h2>Upload Receptor PDB</h2>
+
+    <div class="drop-zone" id="rec-drop">
+      <input type="file" id="rec-file" accept=".pdb">
+      <div id="drop-label">Drop a receptor PDB here or click to browse</div>
+      <div class="muted mt1">Single or multi-model PDB accepted</div>
+    </div>
+
+    <div class="mt1">
+      <h2>Box Definition</h2>
+      <div class="form-row" style="margin-bottom:0.6rem;">
+        <label style="display:inline;margin:0;">
+          <input type="radio" name="box-mode" value="coords" checked>
+          Explicit coordinates
+        </label>
+        <label style="display:inline;margin:0 0 0 1.5rem;">
+          <input type="radio" name="box-mode" value="residues">
+          Residue selection
+        </label>
+        <label style="display:inline;margin:0 0 0 1.5rem;">
+          <input type="radio" name="box-mode" value="ligand">
+          Native ligand centroid
+        </label>
+      </div>
+
+      <div class="form-row" style="margin-bottom:0.6rem;">
+        <label style="display:inline;margin:0;">
+          <input type="checkbox" id="cavity-box" checked>
+          Measure box from the receptor cavity (recommended)
+        </label>
+        <span class="muted" style="font-size:0.78rem;margin-left:0.8rem;">
+          Uses the centre/residues/ligand above only as the pocket seed; the box
+          is grown to the measured cavity plus a surface apron.
+        </span>
+      </div>
+
+      <div id="coords-panel">
+        <div class="form-row">
+          <div class="form-group">
+            <label>Centre X (Å)</label>
+            <input type="number" id="cx" step="0.1" placeholder="-23.0">
+          </div>
+          <div class="form-group">
+            <label>Centre Y (Å)</label>
+            <input type="number" id="cy" step="0.1" placeholder="14.2">
+          </div>
+          <div class="form-group">
+            <label>Centre Z (Å)</label>
+            <input type="number" id="cz" step="0.1" placeholder="60.3">
+          </div>
+        </div>
+      </div>
+
+      <div id="residues-panel" style="display:none;">
+        <div class="form-group">
+          <label>Residue selection (numbers, ranges, or residue names)</label>
+          <input type="text" id="residue-mask"
+                 placeholder="e.g. 305-312  or  LIG  or  ASP,GLU">
+          <div class="muted" style="margin-top:0.3rem;font-size:0.78rem;">
+            Box centre computed as centroid of selected residues Ca atoms.
+          </div>
+        </div>
+      </div>
+
+      <div id="ligand-panel" style="display:none;">
+        <div class="muted" style="padding:0.6rem 0;">
+          Box centre computed from centroid of HETATM records in the PDB.
+          Enter one or more residue names (comma-separated) to target specific ligands.
+          Multiple instances of the same ligand create separate active sites.
+          Overlapping sites are automatically merged with reduced padding.
+        </div>
+        <div class="form-group">
+          <label>
+            Ligand residue name(s)
+            <span class="muted">(comma-separated; blank = all non-protein HETATM)</span>
+          </label>
+          <input type="text" id="hetatm-resname"
+                 placeholder="e.g. LIG  or  TPP,CA,MG">
+        </div>
+        <div class="mt1 flex" style="gap:0.5rem;align-items:center;">
+          <button class="btn btn-ghost" id="detect-sites-btn" type="button"
+                  style="padding:0.3rem 0.8rem;font-size:0.85rem;">
+            Detect Active Sites
+          </button>
+          <span class="muted" id="detect-sites-status" style="font-size:0.82rem;"></span>
+        </div>
+        <div id="detected-sites" style="display:none;margin-top:0.8rem;
+             border:1px solid var(--border);border-radius:6px;padding:0.8rem;">
+          <h3 style="margin:0 0 0.4rem;">Detected Active Sites</h3>
+          <p class="muted" style="font-size:0.82rem;margin-bottom:0.6rem;">
+            Select which sites to prep. Overlapping sites were automatically
+            merged with reduced padding.
+          </p>
+          <div id="sites-list" style="display:flex;flex-direction:column;gap:0.4rem;"></div>
+          <div class="mt1 flex" style="gap:0.5rem;">
+            <button class="btn btn-primary" id="prep-all-sites-btn" type="button">
+              Prep All Selected Sites
+            </button>
+            <button class="btn btn-ghost" id="prep-single-btn" type="button">
+              Prep as Single Combined Box
+            </button>
+          </div>
+          <div id="sites-status" style="margin-top:0.5rem;font-size:0.82rem;"></div>
+        </div>
+      </div>
+
+      <div class="form-row" style="margin-top:0.4rem;">
+        <div class="form-group">
+          <label>Box padding (Å)</label>
+          <input type="number" id="padding" value="10.0" step="0.5" min="0">
+        </div>
+        <div class="form-group">
+          <label>Model deduplication RMSD threshold (Å)</label>
+          <input type="number" id="rmsd-thresh" value="0.5" step="0.1" min="0">
+        </div>
+      </div>
+    </div>
+
+    <div class="form-row mt1">
+      <div class="form-group">
+        <label>Receptor name <span class="muted">(optional — defaults to filename)</span></label>
+        <input type="text" id="receptor-name" placeholder="e.g. heparanase">
+      </div>
+      <div class="form-group">
+        <label>Variant <span class="muted">(optional)</span></label>
+        <input type="text" id="receptor-variant" placeholder="e.g. wildtype or A126E">
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label>Gene identifier <span class="muted">(optional)</span></label>
+        <input type="text" id="gene-id" placeholder="e.g. HPSE">
+      </div>
+      <div class="form-group">
+        <label>Gene database <span class="muted">(optional)</span></label>
+        <select id="gene-db">
+          <option value="">— none —</option>
+          <option value="HGNC">HGNC</option>
+          <option value="Entrez">Entrez</option>
+          <option value="Ensembl">Ensembl</option>
+          <option value="UniProt">UniProt</option>
+        </select>
+      </div>
+    </div>
+    <div class="form-group">
+      <label>Notes <span class="muted">(optional)</span></label>
+      <input type="text" id="receptor-notes" placeholder="e.g. active site mutant">
+    </div>
+
+    <div class="card" style="margin-top:0.8rem;padding:0.8rem;">
+      <h2 style="margin-bottom:0.6rem;">Structure Cleanup Options</h2>
+      <div class="form-group">
+        <label>
+          Remove specific ligand/cofactor
+          <span class="muted">(residue name to strip — leave blank to remove all HETATM,
+          enter <code>none</code> to keep all)</span>
+        </label>
+        <input type="text" id="remove-resnames"
+               placeholder="e.g. LIG  or  ATP,HEM  or  none">
+        <div class="muted" style="font-size:0.78rem;margin-top:0.3rem;">
+          Use this when the PDB contains a bound ligand that defines the search
+          box but should not be included in docking. Cofactors, metals, and
+          other chains are kept when a specific name is given.
+        </div>
+      </div>
+      <div class="form-row" style="margin-top:0.4rem;">
+        <label style="display:inline;margin:0;">
+          <input type="checkbox" id="keep-water">
+          Retain water molecules
+        </label>
+      </div>
+    </div>
+
+    <div class="mt1 flex">
+      <button class="btn btn-primary" id="rec-upload-btn" disabled>
+        Upload &amp; Prep
+      </button>
+      <span class="muted" id="rec-upload-status"></span>
+    </div>
+  </div>
+
+  <div class="card" style="flex:1;">
+    <h2>Inbox</h2>
+    {% if inbox %}
+      <p class="muted" style="margin-bottom:0.6rem;">Waiting for processing:</p>
+      {% for fname in inbox %}
+      <div class="flex" style="margin-bottom:0.3rem;">
+        <span class="badge badge-yellow">waiting</span>
+        <span style="font-size:0.85rem;">{{ fname }}</span>
+      </div>
+      {% endfor %}
+    {% else %}
+      <p class="muted">Inbox is empty.</p>
+    {% endif %}
+  </div>
+</div>
+
+<div class="card mt1">
+  <h2>Receptors ({{ receptors|length }})</h2>
+  {% if receptors %}
+  <table>
+    <thead><tr>
+      <th data-sort>Name</th>
+      <th data-sort>Models Ready</th>
+      <th data-sort>Results</th>
+      <th></th>
+    </tr></thead>
+    <tbody>
+    {% for r in receptors %}
+    <tr>
+      <td><strong>{{ r.name }}</strong></td>
+      <td data-val="{{ r.n_ready }}">
+        {{ r.n_ready }} / {{ r.n_models }}
+        {% if r.n_ready == r.n_models and r.n_models > 0 %}
+          <span class="badge badge-green">all ready</span>
+        {% elif r.n_ready > 0 %}
+          <span class="badge badge-yellow">partial</span>
+        {% else %}
+          <span class="badge badge-red">not ready</span>
+        {% endif %}
+      </td>
+      <td>
+        {% if r.has_results %}
+          <span class="badge badge-green">Available</span>
+        {% else %}
+          <span class="badge badge-gray">None</span>
+        {% endif %}
+      </td>
+      <td class="flex">
+        <a href="/receptors/{{ r.name }}" class="btn btn-ghost"
+           style="padding:0.3rem 0.6rem;font-size:0.8rem;">Detail</a>
+        {% if r.has_results %}
+        <a href="/results/{{ r.name }}" class="btn btn-ghost"
+           style="padding:0.3rem 0.6rem;font-size:0.8rem;">Results</a>
+        {% endif %}
+        {% if r.n_ready > 0 %}
+        <a href="/dock?receptor={{ r.name }}" class="btn btn-primary"
+           style="padding:0.3rem 0.6rem;font-size:0.8rem;">Dock</a>
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted" style="text-align:center;padding:2rem;">
+    No receptors prepared yet. Upload a PDB file above.
+  </p>
+  {% endif %}
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const fileInput = document.getElementById('rec-file');
+const btn       = document.getElementById('rec-upload-btn');
+const stat      = document.getElementById('rec-upload-status');
+const dropLabel = document.getElementById('drop-label');
+
+fileInput.addEventListener('change', () => {
+  if (fileInput.files.length) {
+    const fname = fileInput.files[0].name;
+    dropLabel.textContent = fname;
+    btn.disabled = false;
+    // Pre-fill receptor name from filename stem
+    const nameField = document.getElementById('receptor-name');
+    if (!nameField.value) {
+      nameField.value = fname.replace(/\.pdb$/i, '');
+    }
+  }
+});
+
+document.querySelectorAll('input[name=box-mode]').forEach(r => {
+  r.addEventListener('change', () => {
+    document.getElementById('coords-panel').style.display =
+      r.value === 'coords' ? '' : 'none';
+    document.getElementById('residues-panel').style.display =
+      r.value === 'residues' ? '' : 'none';
+    document.getElementById('ligand-panel').style.display =
+      r.value === 'ligand' ? '' : 'none';
+  });
+});
+
+btn.addEventListener('click', async () => {
+  if (!fileInput.files.length) { toast('Select a PDB file first', false); return; }
+
+  const mode    = document.querySelector('input[name=box-mode]:checked').value;
+  const padding = parseFloat(document.getElementById('padding').value) || 10.0;
+  const rmsd    = parseFloat(document.getElementById('rmsd-thresh').value) || 0.5;
+  const cavity  = document.getElementById('cavity-box').checked;
+  let boxParams = { mode, padding, rmsd_threshold: rmsd, cavity };
+
+  if (mode === 'coords') {
+    const cx = parseFloat(document.getElementById('cx').value);
+    const cy = parseFloat(document.getElementById('cy').value);
+    const cz = parseFloat(document.getElementById('cz').value);
+    if (isNaN(cx) || isNaN(cy) || isNaN(cz)) {
+      toast('Enter X, Y, Z coordinates', false); return;
+    }
+    boxParams = { ...boxParams, cx, cy, cz };
+  } else if (mode === 'residues') {
+    const mask = document.getElementById('residue-mask').value.trim();
+    if (!mask) { toast('Enter a residue selection', false); return; }
+    boxParams = { ...boxParams, residue_mask: mask };
+  } else {
+    boxParams = { ...boxParams,
+      hetatm_resname: document.getElementById('hetatm-resname').value.trim() };
+  }
+
+  btn.disabled = true;
+  stat.textContent = 'Uploading…';
+
+  // Step 1: upload PDB to inbox
+  const fd = new FormData();
+  fd.append('pdb', fileInput.files[0]);
+  fd.append('receptor_name', document.getElementById('receptor-name').value.trim());
+  let pdb_filename;
+  try {
+    const r = await fetch('/receptors/upload', { method:'POST', body: fd });
+    const d = await r.json();
+    if (!d.filename) { toast(d.error || 'Upload failed', false); btn.disabled=false; return; }
+    pdb_filename = d.filename;
+    stat.textContent = 'Submitting prep job…';
+  } catch(e) { toast('Upload error', false); btn.disabled=false; return; }
+
+  // Step 2: submit prep job
+  try {
+    const receptor_name = document.getElementById('receptor-name').value.trim();
+    const r = await fetch('/receptors/prep', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({
+        pdb_filename,
+        box:             boxParams,
+        receptor_name,
+        variant:         document.getElementById('receptor-variant').value.trim(),
+        gene_id:         document.getElementById('gene-id').value.trim(),
+        gene_db:         document.getElementById('gene-db').value,
+        notes:           document.getElementById('receptor-notes').value.trim(),
+        remove_resnames: document.getElementById('remove-resnames').value.trim(),
+        keep_water:      document.getElementById('keep-water').checked,
+      })
+    });
+    const d = await r.json();
+    if (d.job_id) {
+      toast('Prep job submitted: ' + d.job_id);
+      stat.textContent = 'Job: ' + d.job_id;
+      setTimeout(() => location.reload(), 1500);
+    } else {
+      toast(d.error || 'Failed', false);
+      stat.textContent = 'Failed';
+    }
+  } catch(e) { toast('Error submitting job', false); }
+  btn.disabled = false;
+});
+
+// ── Active site detection ──────────────────────────────────────────────────
+let detectedSites = [];
+let uploadedFilename = null;
+
+document.getElementById('detect-sites-btn').addEventListener('click', async () => {
+  const resnames = document.getElementById('hetatm-resname').value.trim();
+  const padding  = parseFloat(document.getElementById('padding').value) || 10.0;
+  const status   = document.getElementById('detect-sites-status');
+
+  if (!resnames) { status.textContent = 'Enter residue name(s) first'; return; }
+
+  // Must have uploaded a file first
+  if (!uploadedFilename && fileInput.files.length) {
+    status.textContent = 'Uploading PDB first…';
+    const fd = new FormData();
+    fd.append('pdb', fileInput.files[0]);
+    fd.append('receptor_name', document.getElementById('receptor-name').value.trim());
+    try {
+      const r = await fetch('/receptors/upload', { method:'POST', body: fd });
+      const d = await r.json();
+      if (!d.filename) { status.textContent = 'Upload failed: ' + (d.error||''); return; }
+      uploadedFilename = d.filename;
+    } catch(e) { status.textContent = 'Upload error'; return; }
+  } else if (!uploadedFilename) {
+    status.textContent = 'Select and upload a PDB file first'; return;
+  }
+
+  status.textContent = 'Detecting…';
+  try {
+    const r = await fetch('/receptors/detect_sites', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ pdb_filename: uploadedFilename, resnames, padding })
+    });
+    const d = await r.json();
+    if (d.error) { status.textContent = 'Error: ' + d.error; return; }
+    detectedSites = d.sites || [];
+    if (!detectedSites.length) {
+      status.textContent = d.message || 'No active sites found';
+      document.getElementById('detected-sites').style.display = 'none';
+      return;
+    }
+    renderSites(detectedSites);
+    status.textContent = `Found ${detectedSites.length} active site(s)`;
+    document.getElementById('detected-sites').style.display = '';
+  } catch(e) { status.textContent = 'Detection failed'; }
+});
+
+function renderSites(sites) {
+  const container = document.getElementById('sites-list');
+  container.innerHTML = '';
+  sites.forEach((site, i) => {
+    const box = site.box;
+    const merged = site.merged ? ` <span style="color:var(--accent);font-size:0.78rem;">[merged ${site.n_merged} instances, padding reduced to ${site.reduced_padding?.toFixed(1)}Å]</span>` : '';
+    const div = document.createElement('div');
+    div.style.cssText = 'display:flex;gap:0.6rem;align-items:flex-start;padding:0.5rem;border:1px solid var(--border);border-radius:4px;';
+    div.innerHTML = `
+      <input type="checkbox" id="site-${i}" checked style="margin-top:3px;">
+      <label for="site-${i}" style="cursor:pointer;flex:1;">
+        <strong>${site.label}</strong>
+        — residue(s): <code>${site.resnames.join(', ')}</code>
+        ${merged}<br>
+        <span class="muted" style="font-size:0.8rem;">
+          centre (${box.cx.toFixed(1)}, ${box.cy.toFixed(1)}, ${box.cz.toFixed(1)})
+          &nbsp;|&nbsp;
+          size ${box.sx.toFixed(1)} × ${box.sy.toFixed(1)} × ${box.sz.toFixed(1)} Å
+        </span>
+      </label>`;
+    container.appendChild(div);
+  });
+}
+
+// Prep all selected detected sites as separate receptors
+document.getElementById('prep-all-sites-btn').addEventListener('click', async () => {
+  const selected = detectedSites.filter((_, i) =>
+    document.getElementById(`site-${i}`)?.checked);
+  if (!selected.length) { return; }
+
+  const statusDiv = document.getElementById('sites-status');
+  const baseName  = document.getElementById('receptor-name').value.trim();
+  const variant   = document.getElementById('receptor-variant').value.trim();
+  const gene_id   = document.getElementById('gene-id').value.trim();
+  const gene_db   = document.getElementById('gene-db').value;
+  const notes     = document.getElementById('receptor-notes').value.trim();
+  const remove_resnames = document.getElementById('remove-resnames').value.trim();
+  const keep_water      = document.getElementById('keep-water').checked;
+  const rmsd     = parseFloat(document.getElementById('rmsd-thresh').value) || 0.5;
+
+  statusDiv.textContent = `Submitting ${selected.length} prep job(s)…`;
+  let submitted = 0, failed = 0;
+
+  for (const site of selected) {
+    const box = site.box;
+    const siteName = baseName
+      ? `${baseName}_${site.label}`
+      : site.label;
+    try {
+      const r = await fetch('/receptors/prep', {
+        method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({
+          pdb_filename:    uploadedFilename,
+          receptor_name:   siteName,
+          box: {
+            mode:           'coords',
+            cx:             box.cx, cy: box.cy, cz: box.cz,
+            size_x:         box.sx, size_y: box.sy, size_z: box.sz,
+            padding:        box.reduced_padding ?? 10.0,
+            rmsd_threshold: rmsd,
+            // honour the cavity checkbox: the detected site centre becomes the
+            // seed and the box is measured around it
+            cavity:         document.getElementById('cavity-box').checked,
+          },
+          variant, gene_id, gene_db, notes,
+          remove_resnames, keep_water,
+        })
+      });
+      const d = await r.json();
+      if (d.job_id) { submitted++; }
+      else { failed++; console.error(site.label, d.error); }
+    } catch(e) { failed++; }
+  }
+
+  statusDiv.textContent =
+    `Submitted ${submitted} job(s)` + (failed ? `, ${failed} failed` : '');
+  if (submitted > 0) setTimeout(() => location.reload(), 2000);
+});
+
+// Prep as single combined box (uses overall bounding box of all selected sites)
+document.getElementById('prep-single-btn').addEventListener('click', async () => {
+  const selected = detectedSites.filter((_, i) =>
+    document.getElementById(`site-${i}`)?.checked);
+  if (!selected.length) { return; }
+
+  const statusDiv = document.getElementById('sites-status');
+  const baseName  = document.getElementById('receptor-name').value.trim();
+
+  // Compute union box
+  const allBoxes = selected.map(s => s.box);
+  const padding  = parseFloat(document.getElementById('padding').value) || 10.0;
+  const minX = Math.min(...allBoxes.map(b => b.cx - b.sx/2));
+  const maxX = Math.max(...allBoxes.map(b => b.cx + b.sx/2));
+  const minY = Math.min(...allBoxes.map(b => b.cy - b.sy/2));
+  const maxY = Math.max(...allBoxes.map(b => b.cy + b.sy/2));
+  const minZ = Math.min(...allBoxes.map(b => b.cz - b.sz/2));
+  const maxZ = Math.max(...allBoxes.map(b => b.cz + b.sz/2));
+  const reducedPad = selected.length > 1 ? padding * 0.5 : padding;
+  const combinedBox = {
+    cx: (minX+maxX)/2, cy: (minY+maxY)/2, cz: (minZ+maxZ)/2,
+    sx: maxX-minX + 2*reducedPad,
+    sy: maxY-minY + 2*reducedPad,
+    sz: maxZ-minZ + 2*reducedPad,
+  };
+
+  const rmsd = parseFloat(document.getElementById('rmsd-thresh').value) || 0.5;
+  try {
+    const r = await fetch('/receptors/prep', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({
+        pdb_filename:  uploadedFilename,
+        receptor_name: baseName || 'combined',
+        box: {
+          mode: 'coords',
+          cx: combinedBox.cx, cy: combinedBox.cy, cz: combinedBox.cz,
+          size_x: combinedBox.sx, size_y: combinedBox.sy, size_z: combinedBox.sz,
+          padding: reducedPad, rmsd_threshold: rmsd,
+          cavity: document.getElementById('cavity-box').checked,
+        },
+        variant:      document.getElementById('receptor-variant').value.trim(),
+        gene_id:      document.getElementById('gene-id').value.trim(),
+        gene_db:      document.getElementById('gene-db').value,
+        notes:        document.getElementById('receptor-notes').value.trim(),
+        remove_resnames: document.getElementById('remove-resnames').value.trim(),
+        keep_water:   document.getElementById('keep-water').checked,
+      })
+    });
+    const d = await r.json();
+    if (d.job_id) {
+      statusDiv.textContent = 'Combined box job submitted: ' + d.job_id;
+      setTimeout(() => location.reload(), 2000);
+    } else {
+      statusDiv.textContent = 'Failed: ' + (d.error || 'unknown');
+    }
+  } catch(e) { statusDiv.textContent = 'Error: ' + e; }
+});
+
+// Track when file is uploaded (to enable detect button)
+fileInput.addEventListener('change', () => {
+  uploadedFilename = null; // reset on new file selection
+});
+</script>
+{% endblock %}

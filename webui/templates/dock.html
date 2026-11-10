@@ -1,0 +1,247 @@
+{% extends "base.html" %}
+{% block title %}Docking — AutoDock{% endblock %}
+{% block content %}
+<h1>Submit Docking Job</h1>
+
+<div class="card-row">
+  <div class="card" style="flex:2;">
+    <h2>Job Configuration</h2>
+
+    <div class="form-group">
+      <label>Receptor</label>
+      <select id="receptor">
+        <option value="">— Select receptor —</option>
+        {% for r in receptors %}
+        <option value="{{ r.name }}"
+          {% if request.args.get('receptor') == r.name %}selected{% endif %}>
+          {{ r.name }} ({{ r.n_ready }} model(s))
+        </option>
+        {% endfor %}
+      </select>
+    </div>
+
+    <div class="form-group">
+      <label>Ligands</label>
+      <div class="flex" style="margin-bottom:0.4rem;">
+        <label style="display:inline;margin:0;">
+          <input type="radio" name="lig-mode" value="all" checked> All ready ligands
+        </label>
+        <label style="display:inline;margin:0 0 0 1rem;">
+          <input type="radio" name="lig-mode" value="select"> Select subset
+        </label>
+      </div>
+      <select id="lig-select" multiple size="6"
+              style="display:none;height:140px;">
+        {% for l in ligands %}
+        <option value="{{ l.name }}">
+          {{ l.name }} — {{ l.formula }} ({{ l.n_heavy_atoms }} heavy, {{ l.n_rot_bonds }} rot)
+        </option>
+        {% endfor %}
+      </select>
+      <div class="muted" id="lig-count">{{ ligands|length }} ligand(s) available</div>
+    </div>
+
+    <div class="form-row">
+      <div class="form-group">
+        <label>Runs / pose (nrun)</label>
+        <input type="number" id="nrun" value="20" min="1" max="500">
+      </div>
+      <div class="form-group">
+        <label>Max failures</label>
+        <input type="number" id="max-failures" value="5" min="1" max="100">
+      </div>
+    </div>
+
+    <div class="form-row">
+      <div class="form-group">
+        <label>Max heavy atoms (filter)</label>
+        <input type="number" id="max-atoms" placeholder="none" min="0">
+      </div>
+      <div class="form-group">
+        <label>Max rot bonds (filter)</label>
+        <input type="number" id="max-rot" placeholder="none" min="0">
+      </div>
+    </div>
+
+    <div class="form-row" style="margin-top:0.4rem;">
+      <label style="display:inline;margin:0;">
+        <input type="checkbox" id="use-conformers" checked>
+        Use pre-generated conformers (nrun=1 per conformer)
+      </label>
+      <label style="display:inline;margin:0 0 0 1.5rem;">
+        <input type="checkbox" id="force">
+        Force re-dock (ignore existing results)
+      </label>
+    </div>
+
+    <div class="mt1">
+      <button class="btn btn-primary" id="submit-btn">Submit Docking Job</button>
+      <span class="muted" id="submit-status" style="margin-left:1rem;"></span>
+    </div>
+  </div>
+
+  <div class="card" style="flex:1;">
+    <h2>Estimated Runtime</h2>
+    <div id="estimate" style="margin-top:0.8rem;">
+      <div class="stat">
+        <div class="val" id="est-time">—</div>
+        <div class="lbl">Estimated total</div>
+      </div>
+      <div class="muted mt1" id="est-detail"></div>
+      <div class="muted" style="font-size:0.75rem;margin-top:0.5rem;">
+        ±50% — varies with GPU and molecule size
+      </div>
+    </div>
+  </div>
+</div>
+
+{% if jobs.running.recent or jobs.pending.recent %}
+<div class="card mt1">
+  <h2>Active Jobs</h2>
+  {% for job in jobs.running.recent + jobs.pending.recent %}
+  <div class="flex" style="margin-bottom:0.4rem;padding:0.4rem;
+       background:#0f1117;border-radius:4px;">
+    <span class="badge {% if job.type == 'dock' %}badge-blue{% else %}badge-yellow{% endif %}">
+      {{ job.type }}
+    </span>
+    <span style="font-size:0.85rem;">{{ job.job_id }}</span>
+    {% if job.options.get('receptor_dir') %}
+    <span class="muted">{{ job.options.receptor_dir.split('/')[-1] }}</span>
+    {% endif %}
+    <span class="muted">{{ job.submitted_at[:19] }}</span>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+
+{% if jobs.completed.recent %}
+<div class="card mt1">
+  <h2>Recently Completed</h2>
+  {% for job in jobs.completed.recent[-5:]|reverse %}
+  <div class="flex" style="margin-bottom:0.3rem;">
+    <span class="badge badge-green">done</span>
+    <span class="muted" style="font-size:0.82rem;">{{ job.job_id }}</span>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+// Ligand mode toggle
+document.querySelectorAll('input[name=lig-mode]').forEach(r => {
+  r.addEventListener('change', () => {
+    const sel = document.getElementById('lig-select');
+    sel.style.display = r.value === 'select' ? '' : 'none';
+    updateEstimate();
+  });
+});
+
+// Runtime estimator
+const SECS_PER_RUN_CONF  = 21;   // ~21s per run per conformer (empirical)
+const SECS_PER_FLEX_RUN  = 12;   // ~12s per flexible run
+
+function formatTime(seconds) {
+  if (seconds < 120)  return `~${Math.round(seconds)}s`;
+  if (seconds < 7200) return `~${Math.round(seconds/60)} min`;
+  if (seconds < 86400) return `~${(seconds/3600).toFixed(1)} hr`;
+  return `~${(seconds/86400).toFixed(1)} days`;
+}
+
+function updateEstimate() {
+  const nrun        = parseInt(document.getElementById('nrun').value) || 20;
+  const useConf     = document.getElementById('use-conformers').checked;
+  const receptor    = document.getElementById('receptor').value;
+  const ligMode     = document.querySelector('input[name=lig-mode]:checked').value;
+  const selOpts     = [...document.getElementById('lig-select').selectedOptions];
+
+  // Count ligands
+  const allLigands = {{ ligands|tojson }};
+  let ligs = ligMode === 'select' && selOpts.length
+    ? allLigands.filter(l => selOpts.some(o => o.value === l.name))
+    : allLigands;
+
+  // Apply filters
+  const maxAtoms = parseInt(document.getElementById('max-atoms').value) || Infinity;
+  const maxRot   = parseInt(document.getElementById('max-rot').value)   || Infinity;
+  ligs = ligs.filter(l => l.n_heavy_atoms <= maxAtoms && l.n_rot_bonds <= maxRot);
+
+  if (!ligs.length || !receptor) {
+    document.getElementById('est-time').textContent = '—';
+    document.getElementById('est-detail').textContent = '';
+    return;
+  }
+
+  // Find receptor model count
+  const rec = {{ receptors|tojson }}.find(r => r.name === receptor);
+  const nModels = rec ? rec.n_ready : 1;
+
+  let totalSec = 0;
+  let totalRuns = 0;
+  for (const l of ligs) {
+    const nConfs = useConf && l.n_conformers > 0 ? l.n_conformers : 1;
+    const effRun = useConf && l.n_conformers > 0 ? 1
+                 : l.n_rot_bonds > 35 ? Math.max(nrun, 100)
+                 : l.n_rot_bonds > 20 ? Math.max(nrun, 50)
+                 : nrun;
+    const runs = nModels * nConfs * effRun;
+    totalRuns += runs;
+    totalSec  += nModels * nConfs * effRun *
+                 (useConf && l.n_conformers > 0 ? SECS_PER_RUN_CONF / 20
+                                                  : SECS_PER_FLEX_RUN);
+  }
+
+  document.getElementById('est-time').textContent = formatTime(totalSec);
+  document.getElementById('est-detail').textContent =
+    `${ligs.length} ligand(s) × ${nModels} receptor model(s) = ${totalRuns.toLocaleString()} total docking runs`;
+}
+
+['receptor','nrun','max-atoms','max-rot','use-conformers'].forEach(id => {
+  document.getElementById(id)?.addEventListener('input', updateEstimate);
+  document.getElementById(id)?.addEventListener('change', updateEstimate);
+});
+document.getElementById('lig-select').addEventListener('change', updateEstimate);
+updateEstimate();
+
+// Submit
+document.getElementById('submit-btn').addEventListener('click', async () => {
+  const receptor = document.getElementById('receptor').value;
+  if (!receptor) { toast('Select a receptor first', false); return; }
+
+  const ligMode  = document.querySelector('input[name=lig-mode]:checked').value;
+  const selOpts  = [...document.getElementById('lig-select').selectedOptions];
+  const compounds = ligMode === 'select' && selOpts.length
+    ? selOpts.map(o => o.value) : null;
+
+  const body = {
+    receptor,
+    use_conformers: document.getElementById('use-conformers').checked,
+    force:          document.getElementById('force').checked,
+    nrun:           parseInt(document.getElementById('nrun').value),
+    max_failures:   parseInt(document.getElementById('max-failures').value),
+    max_atoms:      document.getElementById('max-atoms').value || null,
+    max_rot:        document.getElementById('max-rot').value   || null,
+    compounds,
+  };
+
+  document.getElementById('submit-btn').disabled = true;
+  document.getElementById('submit-status').textContent = 'Submitting…';
+  try {
+    const r = await fetch('/dock/submit', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(body)
+    });
+    const d = await r.json();
+    if (d.job_id) {
+      toast(`Job submitted: ${d.job_id}`);
+      document.getElementById('submit-status').textContent = `Job: ${d.job_id}`;
+    } else {
+      toast(d.error || 'Failed', false);
+      document.getElementById('submit-status').textContent = 'Failed';
+    }
+  } catch(e) { toast('Error', false); }
+  document.getElementById('submit-btn').disabled = false;
+});
+</script>
+{% endblock %}

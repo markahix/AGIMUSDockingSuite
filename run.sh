@@ -1,0 +1,496 @@
+#!/usr/bin/env bash
+# ══════════════════════════════════════════════════════════════════════════════
+# run.sh — AutoDock Pipeline Launcher
+# Containers mirror host paths exactly (no path translation).
+#
+# Usage: ./run.sh <command> [options]
+# Commands: status | ui | watch-ligands | watch-receptors |
+#           prep-ligands | prep-receptor | dock | queue | logs | stop | help
+# ══════════════════════════════════════════════════════════════════════════════
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# ── Configuration resolution ──────────────────────────────────────────────────
+# The config file written by setup.sh is authoritative. Deriving the data root
+# from the script's own location is a silent failure mode: an unpack in the
+# wrong parent directory yields a valid-looking but empty second data tree.
+# Config is consulted first; script-location derivation is only a fallback,
+# and validate_paths() below refuses to proceed if the result is not a real
+# pipeline data tree.
+_autodock_find_conf() {
+    local c
+    for c in "${AUTODOCK_CONF:-}" \
+             "/etc/autodock/pipeline.conf" \
+             "${HOME:-/root}/.config/autodock/pipeline.conf"; do
+        if [ -n "$c" ] && [ -r "$c" ]; then echo "$c"; return 0; fi
+    done
+    return 1
+}
+
+AUTODOCK_CONF_FILE="$(_autodock_find_conf || true)"
+if [ -n "$AUTODOCK_CONF_FILE" ]; then
+    # shellcheck disable=SC1090
+    . "$AUTODOCK_CONF_FILE"
+fi
+
+BASE_DIR="${AUTODOCK_BASE:-$(dirname "$SCRIPT_DIR")}"
+DATA_DIR="${AUTODOCK_DATA:-$BASE_DIR/data}"
+SUITE_DIR="${AUTODOCK_SUITE:-$SCRIPT_DIR}"
+
+LIGAND_DIR="$DATA_DIR/ligands"
+LIBRARY_DIR="$DATA_DIR/library"
+RECEPTORS_DIR="$DATA_DIR/receptors"
+JOBS_DIR="$DATA_DIR/jobs"
+
+LIGAND_IMAGE="markahix/ligand-library-manager:0.4"
+RECEPTOR_IMAGE="markahix/receptor-library-manager:0.4"
+DOCKING_IMAGE="markahix/docking-engine:0.4"
+WEBUI_IMAGE="markahix/autodock-webui:0.4"
+
+USER_ARG="--user $(id -u):$(id -g)"
+
+GREEN='\033[0;32m'; CYAN='\033[0;36m'; YELLOW='\033[1;33m'
+RED='\033[0;31m'; NC='\033[0m'
+ok()  { echo -e "${GREEN}✓${NC} $*"; }
+inf() { echo -e "${CYAN}→${NC} $*"; }
+hdr() { echo -e "\n${CYAN}══ $* ══${NC}"; }
+
+# ── path validation ───────────────────────────────────────────────────────────
+# Refuses to run against a data tree that does not already look like a real
+# pipeline installation. Without this, a mis-located run.sh happily creates an
+# empty tree and every job silently lands where nothing is watching.
+validate_paths() {
+    local missing=()
+    local d
+    for d in "$LIBRARY_DIR" "$RECEPTORS_DIR" "$JOBS_DIR/pending"; do
+        [ -d "$d" ] || missing+=("$d")
+    done
+    if [ ${#missing[@]} -gt 0 ]; then
+        echo -e "${RED}✗ Data tree looks wrong.${NC}" >&2
+        echo "  Resolved DATA_DIR: $DATA_DIR" >&2
+        if [ -n "$AUTODOCK_CONF_FILE" ]; then
+            echo "  From config:       $AUTODOCK_CONF_FILE" >&2
+        else
+            echo "  No config file found — derived from run.sh location." >&2
+            echo "  Expected config at /etc/autodock/pipeline.conf" >&2
+        fi
+        echo "  Missing:" >&2
+        for d in "${missing[@]}"; do echo "    $d" >&2; done
+        echo "" >&2
+        echo "  Run ./run.sh doctor for a full report, or ./setup.sh to install." >&2
+        exit 1
+    fi
+}
+
+# ── doctor ────────────────────────────────────────────────────────────────────
+cmd_doctor() {
+    hdr "AutoDock Installation Report"
+    local problems=0
+
+    echo ""
+    echo "  Configuration"
+    if [ -n "$AUTODOCK_CONF_FILE" ]; then
+        ok "config file: $AUTODOCK_CONF_FILE"
+    else
+        echo -e "${YELLOW}  ⚠${NC} no config file found (checked \$AUTODOCK_CONF, /etc/autodock/pipeline.conf, \$HOME/.config/autodock/pipeline.conf)"
+        echo "      paths derived from run.sh location instead — run ./setup.sh to fix"
+        problems=$((problems+1))
+    fi
+    echo "      BASE_DIR  = $BASE_DIR"
+    echo "      DATA_DIR  = $DATA_DIR"
+    echo "      SUITE_DIR = $SUITE_DIR"
+
+    echo ""
+    echo "  Data directories"
+    local d
+    for d in "$LIGAND_DIR" "$LIBRARY_DIR" "$RECEPTORS_DIR" \
+             "$JOBS_DIR/pending" "$JOBS_DIR/running" \
+             "$JOBS_DIR/completed" "$JOBS_DIR/failed"; do
+        if [ -d "$d" ]; then
+            if [ -w "$d" ]; then ok "$d"
+            else echo -e "${YELLOW}  ⚠${NC} $d (not writable)"; problems=$((problems+1)); fi
+        else
+            echo -e "${RED}  ✗${NC} $d (missing)"; problems=$((problems+1))
+        fi
+    done
+
+    echo ""
+    echo "  Docker images"
+    if ! command -v docker &>/dev/null; then
+        echo -e "${RED}  ✗${NC} docker not found on PATH"
+        problems=$((problems+1))
+    fi
+    local img
+    for img in "$LIGAND_IMAGE" "$RECEPTOR_IMAGE" "$DOCKING_IMAGE" "$WEBUI_IMAGE"; do
+        if docker image inspect "$img" &>/dev/null; then
+            ok "$img"
+        else
+            echo -e "${RED}  ✗${NC} $img (missing — rebuild, or it was removed by 'docker image prune -a')"
+            problems=$((problems+1))
+        fi
+    done
+
+    echo ""
+    echo "  Job runner"
+    if command -v systemctl &>/dev/null \
+       && systemctl is-active --quiet autodock-job-runner 2>/dev/null; then
+        ok "service active"
+    else
+        echo -e "${RED}  ✗${NC} service not active"
+        problems=$((problems+1))
+    fi
+    if [ -f /opt/autodock/job_runner.sh ]; then
+        if diff -q /opt/autodock/job_runner.sh \
+                   "$SUITE_DIR/systemd/job_runner.sh" &>/dev/null; then
+            ok "/opt/autodock/job_runner.sh matches suite copy"
+        else
+            echo -e "${YELLOW}  ⚠${NC} /opt/autodock/job_runner.sh differs from $SUITE_DIR/systemd/job_runner.sh"
+            echo "      installed runner is stale — re-copy it and restart the service"
+            problems=$((problems+1))
+        fi
+    else
+        echo -e "${RED}  ✗${NC} /opt/autodock/job_runner.sh not installed"
+        problems=$((problems+1))
+    fi
+
+    echo ""
+    echo "  Running containers"
+    local cid wui_jobs
+    cid=$(docker ps --filter "ancestor=$WEBUI_IMAGE" --format "{{.ID}}" 2>/dev/null | head -1 || true)
+    if [ -n "${cid:-}" ]; then
+        wui_jobs=$(docker inspect "$cid" \
+            --format '{{range .Config.Env}}{{println .}}{{end}}' \
+            2>/dev/null | sed -n 's/^JOBS_DIR=//p' | head -1 || true)
+        if [ "$wui_jobs" = "$JOBS_DIR" ]; then
+            ok "web UI JOBS_DIR matches ($wui_jobs)"
+        else
+            echo -e "${RED}  ✗${NC} web UI JOBS_DIR mismatch"
+            echo "      container: ${wui_jobs:-<unset>}"
+            echo "      expected:  $JOBS_DIR"
+            echo "      jobs submitted from the UI are landing where nothing watches"
+            problems=$((problems+1))
+        fi
+    else
+        echo "      web UI not running"
+    fi
+
+    echo ""
+    echo "  Job queue"
+    local s n
+    for s in pending running completed failed; do
+        n=$(find "$JOBS_DIR/$s" -name "*.json" 2>/dev/null | wc -l | tr -d ' ' || true)
+        echo "      $s: $n"
+    done
+
+    echo ""
+    if [ "$problems" -eq 0 ]; then
+        ok "No problems found."
+    else
+        echo -e "${YELLOW}  $problems problem(s) found.${NC}"
+    fi
+    echo ""
+    return 0
+}
+
+# ── status ─────────────────────────────────────────────────────────────────────
+cmd_status() {
+    hdr "Pipeline Status"
+    local n_ready
+    n_ready=$(python3 -c "
+import sqlite3, pathlib
+db = pathlib.Path('$LIBRARY_DIR/library_state.db')
+if not db.exists(): print(0); exit()
+c = sqlite3.connect(str(db))
+r = c.execute(\"SELECT COUNT(*) FROM ligands WHERE status='ready'\").fetchone()
+print(r[0] if r else 0)" 2>/dev/null || echo "?")
+    echo "  Library:   $n_ready ligand(s) ready"
+
+    local n_receptors
+    n_receptors=$(find "$RECEPTORS_DIR" -name "receptor_state.db" \
+        ! -path "*/inbox/*" ! -path "*/processed/*" ! -path "*/failed/*" \
+        2>/dev/null | wc -l | tr -d ' ')
+    echo "  Receptors: $n_receptors prepared"
+
+    local n_inbox
+    n_inbox=$(find "$RECEPTORS_DIR/inbox" -name "*.pdb" 2>/dev/null | wc -l | tr -d ' ')
+    [ "$n_inbox" -gt 0 ] && echo "  Inbox:     $n_inbox receptor(s) waiting"
+
+    local np nr nd nf
+    np=$(find "$JOBS_DIR/pending"   -name "*.json" 2>/dev/null | wc -l | tr -d ' ')
+    nr=$(find "$JOBS_DIR/running"   -name "*.json" 2>/dev/null | wc -l | tr -d ' ')
+    nd=$(find "$JOBS_DIR/completed" -name "*.json" 2>/dev/null | wc -l | tr -d ' ')
+    nf=$(find "$JOBS_DIR/failed"    -name "*.json" 2>/dev/null | wc -l | tr -d ' ')
+    echo "  Jobs:      $np pending  $nr running  $nd completed  $nf failed"
+
+    if systemctl is-active --quiet autodock-job-runner 2>/dev/null; then
+        ok "Job runner: active"
+    else
+        echo -e "${YELLOW}  ⚠ Job runner not running${NC}"
+    fi
+
+    local containers
+    containers=$(docker ps \
+        --filter "ancestor=$WEBUI_IMAGE" \
+        --filter "ancestor=$LIGAND_IMAGE" \
+        --filter "ancestor=$RECEPTOR_IMAGE" \
+        --filter "ancestor=$DOCKING_IMAGE" \
+        --format "  {{.Names}}  {{.Image}}  {{.Status}}" 2>/dev/null)
+    [ -n "$containers" ] && echo -e "\n  Running containers:\n$containers"
+}
+
+# ── ui ─────────────────────────────────────────────────────────────────────────
+cmd_ui() {
+    inf "Starting web UI on http://localhost:5000"
+    docker run --rm $USER_ARG \
+        --name autodock-webui \
+        -p 127.0.0.1:5000:5000 \
+        -v "$LIGAND_DIR":"$LIGAND_DIR" \
+        -v "$LIBRARY_DIR":"$LIBRARY_DIR" \
+        -v "$RECEPTORS_DIR":"$RECEPTORS_DIR" \
+        -v "$JOBS_DIR":"$JOBS_DIR" \
+        -e "LIGAND_DIR=$LIGAND_DIR" \
+        -e "LIBRARY_DIR=$LIBRARY_DIR" \
+        -e "RECEPTORS_DIR=$RECEPTORS_DIR" \
+        -e "JOBS_DIR=$JOBS_DIR" \
+        "$WEBUI_IMAGE"
+}
+
+# ── watch-ligands ──────────────────────────────────────────────────────────────
+cmd_watch_ligands() {
+    local interval="${1:-30}"
+    inf "Starting ligand watcher (interval: ${interval}s)"
+    docker run --rm $USER_ARG \
+        --name autodock-ligand-watcher \
+        --network none \
+        -v "$LIGAND_DIR":"$LIGAND_DIR":ro \
+        -v "$LIBRARY_DIR":"$LIBRARY_DIR" \
+        "$LIGAND_IMAGE" library_watcher.py \
+        --ligand_dir  "$LIGAND_DIR" \
+        --library_dir "$LIBRARY_DIR" \
+        --interval "$interval"
+}
+
+# ── watch-receptors ────────────────────────────────────────────────────────────
+cmd_watch_receptors() {
+    local interval="${1:-60}"
+    inf "Starting receptor watcher (interval: ${interval}s)"
+    inf "Set AUTODOCK_CENTER_X/Y/Z env vars for box centre"
+    local cx="${AUTODOCK_CENTER_X:--23.0}"
+    local cy="${AUTODOCK_CENTER_Y:-14.2}"
+    local cz="${AUTODOCK_CENTER_Z:-60.3}"
+    docker run --rm $USER_ARG \
+        --name autodock-receptor-watcher \
+        --network none \
+        -v "$RECEPTORS_DIR":"$RECEPTORS_DIR" \
+        -v "$LIBRARY_DIR":"$LIBRARY_DIR":ro \
+        "$RECEPTOR_IMAGE" receptor_watcher.py \
+        --receptors_dir "$RECEPTORS_DIR" \
+        --library_dir   "$LIBRARY_DIR" \
+        --center_x "$cx" --center_y "$cy" --center_z "$cz" \
+        --autobox --interval "$interval"
+}
+
+# ── prep-ligands ───────────────────────────────────────────────────────────────
+cmd_prep_ligands() {
+    local extra="" conformers=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --all)        extra="--refresh_all"; shift ;;
+            --conformers) conformers="--conformers $2"; shift 2 ;;
+            *) shift ;;
+        esac
+    done
+    inf "Running ligand library prep"
+    docker run --rm $USER_ARG \
+        --network none \
+        -v "$LIGAND_DIR":"$LIGAND_DIR":ro \
+        -v "$LIBRARY_DIR":"$LIBRARY_DIR" \
+        "$LIGAND_IMAGE" prep_ligand.py \
+        --ligand_dir  "$LIGAND_DIR" \
+        --library_dir "$LIBRARY_DIR" \
+        $extra $conformers
+}
+
+# ── prep-receptor ──────────────────────────────────────────────────────────────
+cmd_prep_receptor() {
+    local pdb="${1:-}"
+    [ -z "$pdb" ] && { echo "Usage: run.sh prep-receptor <path/to/receptor.pdb>"; exit 1; }
+    [ -f "$pdb" ] || { echo "File not found: $pdb"; exit 1; }
+    local pdb_abs; pdb_abs="$(realpath "$pdb")"
+    local pdb_dir; pdb_dir="$(dirname "$pdb_abs")"
+    local pdb_name; pdb_name="$(basename "$pdb_abs")"
+    local cx="${AUTODOCK_CENTER_X:--23.0}"
+    local cy="${AUTODOCK_CENTER_Y:-14.2}"
+    local cz="${AUTODOCK_CENTER_Z:-60.3}"
+    inf "Preparing receptor: $pdb_name"
+    docker run --rm $USER_ARG \
+        --network none \
+        -v "$pdb_dir":"$pdb_dir":ro \
+        -v "$RECEPTORS_DIR":"$RECEPTORS_DIR" \
+        -v "$LIBRARY_DIR":"$LIBRARY_DIR":ro \
+        "$RECEPTOR_IMAGE" prep_receptor.py \
+        --pdb           "$pdb_abs" \
+        --receptors_dir "$RECEPTORS_DIR" \
+        --library_dir   "$LIBRARY_DIR" \
+        --center_x "$cx" --center_y "$cy" --center_z "$cz" \
+        --autobox
+}
+
+# ── dock ───────────────────────────────────────────────────────────────────────
+cmd_dock() {
+    local receptor="${1:-}"
+    [ -z "$receptor" ] && { echo "Usage: run.sh dock <receptor_name> [--force] [--nrun N]"; exit 1; }
+    local receptor_dir="$RECEPTORS_DIR/$receptor"
+    [ -d "$receptor_dir" ] || { echo "Receptor not found: $receptor_dir"; exit 1; }
+    [ -f "$receptor_dir/ensemble.json" ] || { echo "ensemble.json not found — run prep first"; exit 1; }
+
+    local force=False nrun=20 use_conformers=True
+    while [[ $# -gt 1 ]]; do
+        case "$2" in
+            --force)          force=True; shift ;;
+            --nrun)           nrun="$3"; shift 2 ;;
+            --no-conformers)  use_conformers=False; shift ;;
+            *) shift ;;
+        esac
+    done
+
+    inf "Submitting dock job: $receptor"
+    python3 - << PYEOF
+import json, uuid
+from datetime import datetime
+from pathlib import Path
+
+job_id = f"dock_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
+job = {
+    "job_id":       job_id,
+    "type":         "dock",
+    "receptor_dir": "$receptor_dir",
+    "library_dir":  "$LIBRARY_DIR",
+    "options": {
+        "use_conformers": $use_conformers,
+        "force":          $force,
+        "nrun":           $nrun,
+        "max_failures":   5,
+    },
+    "submitted_at": datetime.now().isoformat(),
+    "submitted_by": "run.sh",
+}
+path = Path("$JOBS_DIR/pending") / f"{job_id}.json"
+path.write_text(json.dumps(job, indent=2))
+print(f"  Job submitted: {job_id}")
+print(f"  Check:  ./run.sh queue")
+PYEOF
+}
+
+# ── queue ──────────────────────────────────────────────────────────────────────
+cmd_queue() {
+    hdr "Job Queue"
+    for state in pending running completed failed; do
+        local count
+        count=$(find "$JOBS_DIR/$state" -name "*.json" 2>/dev/null | wc -l | tr -d ' ')
+        echo "  $state: $count"
+        if [ "$count" -gt 0 ] && [ "$state" != "completed" ]; then
+            find "$JOBS_DIR/$state" -name "*.json" 2>/dev/null | sort | tail -5 \
+            | while read -r f; do
+                local jid jtype jsub
+                jid=$(python3 -c "import json; print(json.load(open('$f')).get('job_id','?'))" 2>/dev/null)
+                jtype=$(python3 -c "import json; print(json.load(open('$f')).get('type','?'))" 2>/dev/null)
+                jsub=$(python3 -c "import json; print(json.load(open('$f')).get('submitted_at','?')[:19])" 2>/dev/null)
+                echo "    $jtype  $jid  $jsub"
+            done
+        fi
+    done
+}
+
+# ── logs ───────────────────────────────────────────────────────────────────────
+cmd_logs() {
+    local service="${1:-runner}"
+    case "$service" in
+        runner)
+            journalctl -u autodock-job-runner -f --no-pager ;;
+        ui)
+            local cid
+            cid=$(docker ps --filter "ancestor=$WEBUI_IMAGE" --format "{{.ID}}" | head -1)
+            [ -n "$cid" ] && docker logs -f "$cid" || echo "Web UI not running" ;;
+        ligands)
+            local cid
+            cid=$(docker ps --filter "ancestor=$LIGAND_IMAGE" --format "{{.ID}}" | head -1)
+            [ -n "$cid" ] && docker logs -f "$cid" || echo "Ligand watcher not running" ;;
+        receptors)
+            local cid
+            cid=$(docker ps --filter "ancestor=$RECEPTOR_IMAGE" --format "{{.ID}}" | head -1)
+            [ -n "$cid" ] && docker logs -f "$cid" || echo "Receptor watcher not running" ;;
+        *)
+            echo "Available: runner, ui, ligands, receptors" ;;
+    esac
+}
+
+# ── stop ───────────────────────────────────────────────────────────────────────
+cmd_stop() {
+    inf "Stopping pipeline containers"
+    for name in autodock-webui autodock-ligand-watcher autodock-receptor-watcher; do
+        docker stop "$name" 2>/dev/null && ok "Stopped: $name" || true
+    done
+    for image in "$WEBUI_IMAGE" "$LIGAND_IMAGE" "$RECEPTOR_IMAGE"; do
+        local cids
+        cids=$(docker ps --filter "ancestor=$image" --format "{{.ID}}" 2>/dev/null)
+        for cid in $cids; do
+            docker stop "$cid" 2>/dev/null && ok "Stopped: $cid" || true
+        done
+    done
+}
+
+# ── help ───────────────────────────────────────────────────────────────────────
+cmd_help() {
+    cat << 'EOF'
+
+AutoDock Pipeline — run.sh
+
+COMMANDS:
+  status                    System status
+  ui                        Start web UI → http://localhost:5000
+  watch-ligands [interval]  Continuous ligand folder watcher
+  watch-receptors [interval] Continuous receptor inbox watcher
+  prep-ligands [--all]      One-shot ligand prep
+    --conformers N          Override conformer count
+  prep-receptor <pdb>       Prep a receptor directly
+  dock <receptor_name>      Submit docking job
+    --force                 Re-dock all
+    --nrun N                Runs per pose (default: 20)
+    --no-conformers         Use flex PDBQT only
+  queue                     Show job queue
+  doctor                    Verify installation (paths, images, runner, mounts)
+  logs <service>            Tail logs (runner|ui|ligands|receptors)
+  stop                      Stop running containers
+  help                      This message
+
+ENVIRONMENT:
+  AUTODOCK_CENTER_X/Y/Z     Box centre coordinates
+
+EOF
+}
+
+# ── dispatch ───────────────────────────────────────────────────────────────────
+CMD="${1:-help}"; shift || true
+case "$CMD" in
+    doctor)          cmd_doctor "$@"; exit 0 ;;
+    help|--help|-h)  cmd_help; exit 0 ;;
+esac
+
+validate_paths
+
+case "$CMD" in
+    status)          cmd_status "$@" ;;
+    ui)              cmd_ui "$@" ;;
+    watch-ligands)   cmd_watch_ligands "$@" ;;
+    watch-receptors) cmd_watch_receptors "$@" ;;
+    prep-ligands)    cmd_prep_ligands "$@" ;;
+    prep-receptor)   cmd_prep_receptor "$@" ;;
+    dock)            cmd_dock "$@" ;;
+    queue)           cmd_queue "$@" ;;
+    logs)            cmd_logs "$@" ;;
+    stop)            cmd_stop "$@" ;;
+    help|--help|-h)  cmd_help ;;
+    *) echo "Unknown command: $CMD. Run: ./run.sh help"; exit 1 ;;
+esac

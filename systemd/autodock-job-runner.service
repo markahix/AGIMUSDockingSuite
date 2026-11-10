@@ -1,0 +1,25 @@
+[Unit]
+Description=AutoDock Pipeline Job Runner
+After=docker.service network.target
+Requires=docker.service
+
+[Service]
+Type=simple
+ExecStart=/bin/bash /opt/autodock/job_runner.sh
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=autodock-runner
+
+# Paths come from the config file written by setup.sh — no path is hardcoded
+# here, so a reinstall to a different location needs no edit to this unit.
+Environment=AUTODOCK_CONF=/etc/autodock/pipeline.conf
+Environment=AUTODOCK_LOG_DIR=/var/log/autodock
+
+# Security
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
